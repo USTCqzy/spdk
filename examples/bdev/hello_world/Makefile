@@ -36,7 +36,20 @@ include $(SPDK_ROOT_DIR)/mk/spdk.modules.mk
 APP = hello_bdev
 
 C_SRCS := hello_bdev.c
+#C_SRCS := ./module/bdev/ocf/vbdev_ocf.c hello_bdev.c
+
+$(info pwd is $(PWD))
+
+#CFLAGS += -I$(PWD)/ocf/inc/ -I$(PWD)/ocf/env/posix -I$(PWD)/lib/env_ocf/include
+#CFLAGS += -I$(PWD)/ocf/example/simple/src/ocf/env/ -I$(PWD)/ocf/example/simple/include/ -I$(PWD)/module/bdev/
+
+CFLAGS += -I$(PWD)/ocf/example/simple/src/ocf/env/ -I$(PWD)/ocf/example/simple/include/ -I$(PWD)/ocf/example/simple/src/
+CFLAGS += -I$(PWD)/module/bdev/ -L$(PWD)/build/lib/ -l:libspdk_bdev_ocf.a
+
+#CFLAGS += -I$(PWD)/module/bdev/ -L$(PWD)/build/lib/ -Wl,-Bstatic -lspdk_bdev_ocf
 
 SPDK_LIB_LIST = $(ALL_MODULES_LIST) event event_bdev
 
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk
+
+$(info CFLAGS is $(CFLAGS))

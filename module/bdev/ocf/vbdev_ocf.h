@@ -215,4 +215,6 @@ typedef void (*vbdev_ocf_foreach_fn)(struct vbdev_ocf *, void *);
 /* Execute fn for each OCF device that is online or waits for base devices */
 void vbdev_ocf_foreach(vbdev_ocf_foreach_fn fn, void *ctx);
 
+static void rpc_bdev_ocf_get_stats_cmpl(ocf_cache_t cache, void *priv, int error);
+
 #endif
