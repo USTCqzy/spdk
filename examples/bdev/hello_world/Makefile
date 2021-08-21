@@ -44,8 +44,10 @@ $(info pwd is $(PWD))
 #CFLAGS += -I$(PWD)/ocf/example/simple/src/ocf/env/ -I$(PWD)/ocf/example/simple/include/ -I$(PWD)/module/bdev/
 
 CFLAGS += -I$(PWD)/ocf/example/simple/src/ocf/env/ -I$(PWD)/ocf/example/simple/include/ -I$(PWD)/ocf/example/simple/src/
-CFLAGS += -I$(PWD)/module/bdev/ -L$(PWD)/build/lib/ -l:libspdk_bdev_ocf.a
-
+CFLAGS += -I$(PWD)/module/bdev/
+#LDFLAGS += -L$(PWD)/build/lib/ -lspdk_bdev_ocf
+LDFLAGS += -L$(PWD)/build/lib/ -l:libspdk_bdev_ocf.a
+#LDFLAGS += -Wl,-Bstatic -lspdk_bdev_ocf
 #CFLAGS += -I$(PWD)/module/bdev/ -L$(PWD)/build/lib/ -Wl,-Bstatic -lspdk_bdev_ocf
 
 SPDK_LIB_LIST = $(ALL_MODULES_LIST) event event_bdev
@@ -53,3 +55,4 @@ SPDK_LIB_LIST = $(ALL_MODULES_LIST) event event_bdev
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk
 
 $(info CFLAGS is $(CFLAGS))
+$(info LDFLAGS is $(LDFLAGS))

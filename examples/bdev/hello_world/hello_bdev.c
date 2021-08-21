@@ -43,18 +43,19 @@
 #include <pthread.h>
 #include "ocf/ocf.h"
 #include "ocf/ocf_cache_priv.h"
-#include "ocf/stats.h"
+//#include "ocf/stats.h"
 #include "ocf/vbdev_ocf.h"
 #define SPDK_TIME (spdk_get_ticks())
 #define SPDK_TIME_DURATION(start, end, tsc_rate) (((end) - (start))*1.0 / (tsc_rate) * 1000 * 1000 * 1000)
 #define SPDK_TICKS_PER_SECOND (spdk_get_ticks_hz())
-#define REQUEST_NUM 50000
-#define ALIGN_NUM 10000
+#define REQUEST_NUM 100000
+#define ALIGN_NUM REQUEST_NUM
 #define ALIGNMENT 512
 #define IO_SIZE 512
 #define WORKLOAD_SIZE (20 << 20)
 
 static char *g_bdev_name = "Malloc0";
+int thread_num = 1;
 
 static void hello_read(void *arg);
 
@@ -81,6 +82,7 @@ static void
 hello_bdev_usage(void)
 {
 	printf(" -b <bdev>                 name of the bdev to use\n");
+	printf(" -a <thread>               number of thread to use\n");
 }
 
 /*
@@ -91,6 +93,9 @@ static int hello_bdev_parse_arg(int ch, char *arg)
 	switch (ch) {
 	case 'b':
 		g_bdev_name = arg;
+		break;
+	case 'a':
+		thread_num = atoi(arg);
 		break;
 	default:
 		return -EINVAL;
@@ -113,17 +118,17 @@ perform_workload(struct spdk_bdev_io *bdev_io, bool success, void *arg)
 		SPDK_ERRLOG("bdev io read error\n");
 	}
 
-    if (hello_context->times % ALIGN_NUM == 0 && hello_context->times != 0){
+    if (hello_context->times % ALIGN_NUM == 0 && hello_context->times != 0 && hello_context->times != REQUEST_NUM){
         double dura_time = SPDK_TIME_DURATION(hello_context->begin_time, SPDK_TIME, SPDK_TICKS_PER_SECOND)*1.0/1000;
         //printf("Read time: %.2lf us\n", dura_time);
-        printf("Avg Read time: %.2lf us, count: %d\n", dura_time/ALIGN_NUM, ALIGN_NUM);
+        printf("Avg Read time: %.2lf us, count: %d, begin: %ld, end: %ld\n", dura_time/ALIGN_NUM, ALIGN_NUM, hello_context->begin_time, SPDK_TIME);
         hello_context->begin_time = SPDK_TIME;
         hello_context->times--;
     }
     else if (hello_context->times == 0){
         double dura_time = SPDK_TIME_DURATION(hello_context->begin_time, SPDK_TIME, SPDK_TICKS_PER_SECOND)*1.0/1000;
         //printf("Read time: %.2lf us\n", dura_time);
-        printf("Avg Read time: %.2lf us, count: %d\n", dura_time/ALIGN_NUM, ALIGN_NUM);
+        printf("Avg Read time: %.2lf us, count: %d, begin: %ld, end: %ld\n", dura_time/ALIGN_NUM, ALIGN_NUM, hello_context->begin_time, SPDK_TIME);
         
 		// print stats
 		printf("%s\n", hello_context->bdev_name);
@@ -133,7 +138,7 @@ perform_workload(struct spdk_bdev_io *bdev_io, bool success, void *arg)
 			ocf_cache_t cache;
 			ocf_ctx_t ctx;
 			struct vbdev_ocf *vbdev = vbdev_ocf_get_by_name(hello_context->bdev_name);
-			ocf_mngt_cache_read_lock(vbdev->ocf_cache, rpc_bdev_ocf_get_stats_cmpl, ctx);
+			/*ocf_mngt_cache_read_lock(vbdev->ocf_cache, rpc_bdev_ocf_get_stats_cmpl, ctx);
 			int ret = ocf_mngt_cache_get_by_name(ctx, hello_context->bdev_name, \
 										strlen(hello_context->bdev_name), &cache);
 			if (ret != 0)
@@ -143,7 +148,7 @@ perform_workload(struct spdk_bdev_io *bdev_io, bool success, void *arg)
 			struct vbdev_ocf_stats stats;
 			ret = vbdev_ocf_stats_get(cache, ocf_core_get_name(&cache->core[0]), &stats);
 			if (ret != 0)
-				printf("error!\n");
+				printf("error!\n");*/
 		}
 
 		spdk_put_io_channel(hello_context->bdev_io_channel);
@@ -396,18 +401,28 @@ struct hello_prepare_t {
 
 static int hello_start_prepare(struct hello_prepare_t *hello_prepare) {
 	printf("thread num is %d\n", hello_prepare->thread_num);
+	printf("bdev is %s\n", hello_prepare->hello_context->bdev_name);
 	fflush(stdout);
 	struct hello_context_t **hello_context = (struct hello_context_t **)malloc(sizeof(struct hello_context_t *) * hello_prepare->thread_num);
-	for(int i = 0; i < hello_prepare->thread_num; i++) {
+	//pthread_t *tid = (pthread_t *)malloc(sizeof(pthread_t) * hello_prepare->thread_num);
+	int i;
+	for(i = 0; i < hello_prepare->thread_num; i++) {
 		hello_context[i] = (struct hello_context_t *)malloc(sizeof(struct hello_context_t));
 		hello_context[i]->bdev_name = hello_prepare->hello_context->bdev_name;
+		//printf("bdev is %s\n", hello_context[i]->bdev_name);
 		hello_start(hello_context[i]);
+		//pthread_create(&tid[i], NULL, hello_start, &hello_context[i]);
+	}
+	/*for(i = 0; i < hello_prepare->thread_num; i++) {
+		pthread_join(tid[i], NULL);
+		//free(hello_context[i]);
 	}
 	//hello_start(hello_prepare->hello_context);
-	/*for(int i = 0; i < hello_prepare->thread_num; i++) {
+	for(i = 0; i < hello_prepare->thread_num; i++) {
 		free(hello_context[i]);
 	}
-	free(hello_context);*/
+	free(hello_context);
+	//free(tid);*/
 }
 
 int
@@ -415,7 +430,7 @@ main(int argc, char **argv)
 {
 	struct spdk_app_opts opts = {};
 	int rc = 0;
-	int thread_num = 2;
+	//int thread_num = 1;
 	struct hello_context_t hello_context = {};
 	struct hello_prepare_t hello_prepare = {};
 
@@ -427,7 +442,7 @@ main(int argc, char **argv)
 	 * Parse built-in SPDK command line parameters as well
 	 * as our custom one(s).
 	 */
-	if ((rc = spdk_app_parse_args(argc, argv, &opts, "b:", NULL, hello_bdev_parse_arg,
+	if ((rc = spdk_app_parse_args(argc, argv, &opts, "b:a:", NULL, hello_bdev_parse_arg,
 				      hello_bdev_usage)) != SPDK_APP_PARSE_ARGS_SUCCESS) {
 		exit(rc);
 	}
