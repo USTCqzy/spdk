@@ -39,25 +39,21 @@
 #include "spdk/log.h"
 #include "spdk/string.h"
 #include "spdk/bdev_zone.h"
-
-#include <pthread.h>
 #include "ocf/ocf.h"
 #include "ocf/ocf_cache_priv.h"
-//#include "ocf/stats.h"
 #include "ocf/vbdev_ocf.h"
+#include "ocf/stats.h"
 #define SPDK_TIME (spdk_get_ticks())
 #define SPDK_TIME_DURATION(start, end, tsc_rate) (((end) - (start))*1.0 / (tsc_rate) * 1000 * 1000 * 1000)
 #define SPDK_TICKS_PER_SECOND (spdk_get_ticks_hz())
-#define REQUEST_NUM 100000
-#define ALIGN_NUM REQUEST_NUM
+#define REQUEST_NUM 10000
 #define ALIGNMENT 512
-#define IO_SIZE 512
-#define WORKLOAD_SIZE (20 << 20)
-
-static char *g_bdev_name = "Malloc0";
-int thread_num = 1;
+#define WORKLOAD_SIZE (1 << 20)
 
 static void hello_read(void *arg);
+
+static char *g_bdev_name = "Malloc0";
+static bool print_cache = false;
 
 /*
  * We'll use this struct to gather housekeeping hello_context to pass between
@@ -70,9 +66,8 @@ struct hello_context_t {
 	char *buff;
 	char *bdev_name;
 	struct spdk_bdev_io_wait_entry bdev_io_wait;
-    int times;
-    uint64_t begin_time;
-	int id;
+	uint64_t begin_time;
+	int times;
 };
 
 /*
@@ -82,7 +77,7 @@ static void
 hello_bdev_usage(void)
 {
 	printf(" -b <bdev>                 name of the bdev to use\n");
-	printf(" -a <thread>               number of thread to use\n");
+	printf(" -a			               print cache stats\n");
 }
 
 /*
@@ -90,12 +85,13 @@ hello_bdev_usage(void)
  */
 static int hello_bdev_parse_arg(int ch, char *arg)
 {
+	printf("%c\n", ch);
 	switch (ch) {
 	case 'b':
 		g_bdev_name = arg;
 		break;
 	case 'a':
-		thread_num = atoi(arg);
+		print_cache = true;
 		break;
 	default:
 		return -EINVAL;
@@ -103,114 +99,139 @@ static int hello_bdev_parse_arg(int ch, char *arg)
 	return 0;
 }
 
-static void
-perform_workload(struct spdk_bdev_io *bdev_io, bool success, void *arg)
-{
-    struct hello_context_t *hello_context = arg;
+/*
+ * Callback function for read io completion.
+ */
+struct get_ocf_stats_ctx {
+	struct spdk_jsonrpc_request *request;
+	char *core_name;
+};
 
-    /* Complete the I/O */
-	spdk_bdev_free_io(bdev_io);
+static void
+rpc_bdev_ocf_get_stats_cmpl(ocf_cache_t cache, void *priv, int error)
+{
+	struct get_ocf_stats_ctx *ctx = (struct get_ocf_stats_ctx *) priv;
+	struct vbdev_ocf_stats stats;
+
+	if (error) {
+		goto end;
+	}
+
+	error = vbdev_ocf_stats_get(cache, ctx->core_name, &stats);
+
+	printf("%-20s\t%-5s\t%-5s\n", "Stats", "Count", "%");
+	printf("%-20s\t%-5ld\t%-5.2lf\n", "Read hits", stats.reqs.rd_hits.value,
+	       stats.reqs.rd_hits.fraction * 1.0 / 100);
+	printf("%-20s\t%-5ld\t%-5.2lf\n", "Read partial misses", stats.reqs.rd_partial_misses.value,
+	       stats.reqs.rd_partial_misses.fraction * 1.0 / 100);
+	printf("%-20s\t%-5ld\t%-5.2lf\n", "Read full misses", stats.reqs.rd_full_misses.value,
+	       stats.reqs.rd_full_misses.fraction * 1.0 / 100);
+	printf("%-20s\t%-5ld\t%-5.2lf\n", "Read total", stats.reqs.rd_total.value,
+	       stats.reqs.rd_total.fraction * 1.0 / 100);
+	printf("%-20s\t%-5ld\t%-5.2lf\n", "Pass-Through reads", stats.reqs.rd_pt.value,
+	       stats.reqs.rd_pt.fraction * 1.0 / 100);
+
+	ocf_mngt_cache_read_unlock(cache);
+
+	if (error) {
+		goto end;
+	}
+
+end:
+	if (error) {
+		printf("error!\n");
+	}
+	free(ctx);
+}
+
+static void
+read_complete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	struct hello_context_t *hello_context = cb_arg;
 
 	if (success) {
-		//SPDK_NOTICELOG("Read string from bdev : %s\n", hello_context->buff);
-		//fflush(stdout);
+		/*SPDK_NOTICELOG("Read string from bdev : %s\n", hello_context->buff);*/
 	} else {
 		SPDK_ERRLOG("bdev io read error\n");
 	}
 
-    if (hello_context->times % ALIGN_NUM == 0 && hello_context->times != 0 && hello_context->times != REQUEST_NUM){
-        double dura_time = SPDK_TIME_DURATION(hello_context->begin_time, SPDK_TIME, SPDK_TICKS_PER_SECOND)*1.0/1000;
-        //printf("Read time: %.2lf us\n", dura_time);
-        printf("Avg Read time: %.2lf us, count: %d, begin: %ld, end: %ld\n", dura_time/ALIGN_NUM, ALIGN_NUM, hello_context->begin_time, SPDK_TIME);
-        hello_context->begin_time = SPDK_TIME;
-        hello_context->times--;
-    }
-    else if (hello_context->times == 0){
-        double dura_time = SPDK_TIME_DURATION(hello_context->begin_time, SPDK_TIME, SPDK_TICKS_PER_SECOND)*1.0/1000;
-        //printf("Read time: %.2lf us\n", dura_time);
-        printf("Avg Read time: %.2lf us, count: %d, begin: %ld, end: %ld\n", dura_time/ALIGN_NUM, ALIGN_NUM, hello_context->begin_time, SPDK_TIME);
-        
-		// print stats
-		printf("%s\n", hello_context->bdev_name);
-		const char *cache_name= "Cache";
-		if(strstr(hello_context->bdev_name, cache_name)){
-			
-			ocf_cache_t cache;
-			ocf_ctx_t ctx;
-			struct vbdev_ocf *vbdev = vbdev_ocf_get_by_name(hello_context->bdev_name);
-			/*ocf_mngt_cache_read_lock(vbdev->ocf_cache, rpc_bdev_ocf_get_stats_cmpl, ctx);
-			int ret = ocf_mngt_cache_get_by_name(ctx, hello_context->bdev_name, \
-										strlen(hello_context->bdev_name), &cache);
-			if (ret != 0)
-				printf("error!\n");
-			// cache get
-			printf("core name: %s\n", ocf_core_get_name(&cache->core[0]));
-			struct vbdev_ocf_stats stats;
-			ret = vbdev_ocf_stats_get(cache, ocf_core_get_name(&cache->core[0]), &stats);
-			if (ret != 0)
-				printf("error!\n");*/
+	/* Complete the bdev io and close the channel */
+	spdk_bdev_free_io(bdev_io);
+
+	if (hello_context->times != 0) {
+		hello_context->times--;
+		int temp = rand() % WORKLOAD_SIZE;
+		temp = temp - temp % ALIGNMENT;
+		int rc = spdk_bdev_read(hello_context->bdev_desc, hello_context->bdev_io_channel,
+					hello_context->buff, temp, ALIGNMENT, read_complete, hello_context);
+		if (rc == -ENOMEM) {
+			SPDK_NOTICELOG("Queueing io\n");
+			/* In case we cannot perform I/O now, queue I/O */
+			hello_context->bdev_io_wait.bdev = hello_context->bdev;
+			hello_context->bdev_io_wait.cb_fn = hello_read;
+			hello_context->bdev_io_wait.cb_arg = hello_context;
+			spdk_bdev_queue_io_wait(hello_context->bdev, hello_context->bdev_io_channel,
+						&hello_context->bdev_io_wait);
+		} else if (rc) {
+			SPDK_ERRLOG("%s error while reading from bdev: %d\n", spdk_strerror(-rc), rc);
+			spdk_put_io_channel(hello_context->bdev_io_channel);
+			spdk_bdev_close(hello_context->bdev_desc);
+			spdk_app_stop(-1);
 		}
+		return;
+	}
+	double dura_time = SPDK_TIME_DURATION(hello_context->begin_time, SPDK_TIME,
+					      SPDK_TICKS_PER_SECOND) * 1.0 / 1000;
+	printf("Avg Read time: %.2lf us\n", dura_time / REQUEST_NUM);
 
-		spdk_put_io_channel(hello_context->bdev_io_channel);
-        spdk_bdev_close(hello_context->bdev_desc);
-        SPDK_NOTICELOG("Stopping app\n");
-        spdk_app_stop(success ? 0 : -1);
-        return;
-    } else{
-        hello_context->times--;
-    }
-        
-	int rc = 0;
-    int temp = rand() % WORKLOAD_SIZE;
-    temp = temp - temp % ALIGNMENT;
-    //printf("read offset: %d\n", temp);
-    rc = spdk_bdev_read(hello_context->bdev_desc, hello_context->bdev_io_channel,
-                hello_context->buff, temp, IO_SIZE, perform_workload, hello_context);
+	if (print_cache) {
+		struct get_ocf_stats_ctx *ctx = (struct get_ocf_stats_ctx *)malloc(sizeof(
+							struct get_ocf_stats_ctx));
+		struct vbdev_ocf *vbdev = vbdev_ocf_get_by_name(hello_context->bdev_name);
+		if (vbdev == NULL) {
+			printf("error one!\n");
+			free(ctx);
+			goto end;
+		}
+		ctx->core_name = vbdev->core.name;
+		printf("vbdev->core.name %s\n", vbdev->core.name);
+		ocf_cache_t cache = vbdev->ocf_cache;
+		ocf_mngt_cache_read_lock(vbdev->ocf_cache, rpc_bdev_ocf_get_stats_cmpl, ctx);
+	}
 
-    if (rc == -ENOMEM) {
-        SPDK_NOTICELOG("Queueing io\n");
-        /* In case we cannot perform I/O now, queue I/O */
-        hello_context->bdev_io_wait.bdev = hello_context->bdev;
-        hello_context->bdev_io_wait.cb_fn = hello_read;
-        hello_context->bdev_io_wait.cb_arg = hello_context;
-        spdk_bdev_queue_io_wait(hello_context->bdev, hello_context->bdev_io_channel,
-                    &hello_context->bdev_io_wait);
-    } else if (rc) {
-        SPDK_ERRLOG("%s error while reading from bdev: %d\n", spdk_strerror(-rc), rc);
-        spdk_put_io_channel(hello_context->bdev_io_channel);
-        spdk_bdev_close(hello_context->bdev_desc);
-        spdk_app_stop(-1);
-    }
+end:
+	spdk_put_io_channel(hello_context->bdev_io_channel);
+	spdk_bdev_close(hello_context->bdev_desc);
+	SPDK_NOTICELOG("Stopping app\n");
+	spdk_app_stop(success ? 0 : -1);
 }
 
 static void
 hello_read(void *arg)
 {
 	struct hello_context_t *hello_context = arg;
-    hello_context->times = REQUEST_NUM;
-    hello_context->begin_time = SPDK_TIME;
-    //atomic_exchange(&time_count, hello_context->times);
-    //perform_workload(hello_context);
-
 	int rc = 0;
-    rc = spdk_bdev_read(hello_context->bdev_desc, hello_context->bdev_io_channel,
-                hello_context->buff, 0, IO_SIZE, perform_workload, hello_context);
+	uint32_t length = spdk_bdev_get_block_size(hello_context->bdev);
+	hello_context->times = REQUEST_NUM;
 
-    if (rc == -ENOMEM) {
-        SPDK_NOTICELOG("Queueing io\n");
-        /* In case we cannot perform I/O now, queue I/O */
-        hello_context->bdev_io_wait.bdev = hello_context->bdev;
-        hello_context->bdev_io_wait.cb_fn = hello_read;
-        hello_context->bdev_io_wait.cb_arg = hello_context;
-        spdk_bdev_queue_io_wait(hello_context->bdev, hello_context->bdev_io_channel,
-                    &hello_context->bdev_io_wait);
-    } else if (rc) {
-        SPDK_ERRLOG("%s error while reading from bdev: %d\n", spdk_strerror(-rc), rc);
-        spdk_put_io_channel(hello_context->bdev_io_channel);
-        spdk_bdev_close(hello_context->bdev_desc);
-        spdk_app_stop(-1);
-    }
+	SPDK_NOTICELOG("Reading io\n");
+	rc = spdk_bdev_read(hello_context->bdev_desc, hello_context->bdev_io_channel,
+			    hello_context->buff, 0, length, read_complete, hello_context);
 
+	if (rc == -ENOMEM) {
+		SPDK_NOTICELOG("Queueing io\n");
+		/* In case we cannot perform I/O now, queue I/O */
+		hello_context->bdev_io_wait.bdev = hello_context->bdev;
+		hello_context->bdev_io_wait.cb_fn = hello_read;
+		hello_context->bdev_io_wait.cb_arg = hello_context;
+		spdk_bdev_queue_io_wait(hello_context->bdev, hello_context->bdev_io_channel,
+					&hello_context->bdev_io_wait);
+	} else if (rc) {
+		SPDK_ERRLOG("%s error while reading from bdev: %d\n", spdk_strerror(-rc), rc);
+		spdk_put_io_channel(hello_context->bdev_io_channel);
+		spdk_bdev_close(hello_context->bdev_desc);
+		spdk_app_stop(-1);
+	}
 }
 
 /*
@@ -239,6 +260,7 @@ write_complete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 	length = spdk_bdev_get_block_size(hello_context->bdev);
 	memset(hello_context->buff, 0, length);
 
+	hello_context->begin_time = SPDK_TIME;
 	hello_read(hello_context);
 }
 
@@ -250,13 +272,8 @@ hello_write(void *arg)
 	uint32_t length = spdk_bdev_get_block_size(hello_context->bdev);
 
 	SPDK_NOTICELOG("Writing to the bdev\n");
-	uint64_t time_write = SPDK_TIME;
-	rc = spdk_bdev_write(hello_context->bdev_desc, hello_context->bdev_io_channel,\
-			    hello_context->buff, 0, length, write_complete, hello_context);
-	//rc = spdk_bdev_read(hello_context->bdev_desc, hello_context->bdev_io_channel,\
-			    hello_context->buff, 0, length, write_complete, hello_context);
-	printf("Write time: %.2lf us\n", SPDK_TIME_DURATION(time_write, SPDK_TIME, SPDK_TICKS_PER_SECOND));
-
+	rc = spdk_bdev_write(hello_context->bdev_desc, hello_context->bdev_io_channel,
+			     hello_context->buff, 0, length, write_complete, hello_context);
 
 	if (rc == -ENOMEM) {
 		SPDK_NOTICELOG("Queueing io\n");
@@ -374,9 +391,7 @@ hello_start(void *arg1)
 	 */
 	blk_size = spdk_bdev_get_block_size(hello_context->bdev);
 	buf_align = spdk_bdev_get_buf_align(hello_context->bdev);
-    printf("blk_size: %d, buf_align: %d\n", blk_size, buf_align);
-
-	hello_context->buff = spdk_dma_zmalloc(IO_SIZE, buf_align, NULL);
+	hello_context->buff = spdk_dma_zmalloc(blk_size, buf_align, NULL);
 	if (!hello_context->buff) {
 		SPDK_ERRLOG("Failed to allocate buffer\n");
 		spdk_put_io_channel(hello_context->bdev_io_channel);
@@ -394,45 +409,13 @@ hello_start(void *arg1)
 
 	hello_write(hello_context);
 }
-struct hello_prepare_t {
-	struct hello_context_t *hello_context;
-	int thread_num;
-};
-
-static int hello_start_prepare(struct hello_prepare_t *hello_prepare) {
-	printf("thread num is %d\n", hello_prepare->thread_num);
-	printf("bdev is %s\n", hello_prepare->hello_context->bdev_name);
-	fflush(stdout);
-	struct hello_context_t **hello_context = (struct hello_context_t **)malloc(sizeof(struct hello_context_t *) * hello_prepare->thread_num);
-	//pthread_t *tid = (pthread_t *)malloc(sizeof(pthread_t) * hello_prepare->thread_num);
-	int i;
-	for(i = 0; i < hello_prepare->thread_num; i++) {
-		hello_context[i] = (struct hello_context_t *)malloc(sizeof(struct hello_context_t));
-		hello_context[i]->bdev_name = hello_prepare->hello_context->bdev_name;
-		//printf("bdev is %s\n", hello_context[i]->bdev_name);
-		hello_start(hello_context[i]);
-		//pthread_create(&tid[i], NULL, hello_start, &hello_context[i]);
-	}
-	/*for(i = 0; i < hello_prepare->thread_num; i++) {
-		pthread_join(tid[i], NULL);
-		//free(hello_context[i]);
-	}
-	//hello_start(hello_prepare->hello_context);
-	for(i = 0; i < hello_prepare->thread_num; i++) {
-		free(hello_context[i]);
-	}
-	free(hello_context);
-	//free(tid);*/
-}
 
 int
 main(int argc, char **argv)
 {
 	struct spdk_app_opts opts = {};
 	int rc = 0;
-	//int thread_num = 1;
 	struct hello_context_t hello_context = {};
-	struct hello_prepare_t hello_prepare = {};
 
 	/* Set default values in opts structure. */
 	spdk_app_opts_init(&opts, sizeof(opts));
@@ -442,22 +425,20 @@ main(int argc, char **argv)
 	 * Parse built-in SPDK command line parameters as well
 	 * as our custom one(s).
 	 */
-	if ((rc = spdk_app_parse_args(argc, argv, &opts, "b:a:", NULL, hello_bdev_parse_arg,
+	if ((rc = spdk_app_parse_args(argc, argv, &opts, "ab:", NULL, hello_bdev_parse_arg,
 				      hello_bdev_usage)) != SPDK_APP_PARSE_ARGS_SUCCESS) {
 		exit(rc);
 	}
 	hello_context.bdev_name = g_bdev_name;
-	
+
+	/*hello_context.begin_time = SPDK_TIME;*/
 	/*
 	 * spdk_app_start() will initialize the SPDK framework, call hello_start(),
 	 * and then block until spdk_app_stop() is called (or if an initialization
 	 * error occurs, spdk_app_start() will return with rc even without calling
 	 * hello_start().
 	 */
-	
-	hello_prepare.hello_context = &hello_context;
-	hello_prepare.thread_num = thread_num;
-	rc = spdk_app_start(&opts, hello_start_prepare, &hello_prepare);
+	rc = spdk_app_start(&opts, hello_start, &hello_context);
 	if (rc) {
 		SPDK_ERRLOG("ERROR starting application\n");
 	}
@@ -465,9 +446,9 @@ main(int argc, char **argv)
 	/* At this point either spdk_app_stop() was called, or spdk_app_start()
 	 * failed because of internal error.
 	 */
+
 	/* When the app stops, free up memory that we allocated. */
 	spdk_dma_free(hello_context.buff);
-
 
 	/* Gracefully close out all of the SPDK subsystems. */
 	spdk_app_fini();
